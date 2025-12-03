@@ -12,6 +12,7 @@ class DataCenter:
         self.ram = ram
         self.installed_vnfs = {vnf: 0 for vnf in VNF_TYPES}
         self.allocated_vnfs = {}
+ 
         
     def can_install(self, vnf_type):
         spec = VNF_SPECS[vnf_type]
@@ -84,6 +85,40 @@ class CoreNetwork:
     def deallocate_bw(self, path, bw):
         for i in range(len(path) - 1):
             self.link_used_bw[path[i]][path[i+1]] -= bw
+            
+    # calculate shortest path based on link_bw and link_used_bw
+    def get_shortest_path(self, src, dst, bw):
+        path=[]
+        # dijktra algorithm
+        visited = set()
+        distances = {i: float('inf') for i in range(self.num_dcs)}
+        previous_nodes = {i: None for i in range(self.num_dcs)}
+        distances[src] = 0
+        for _ in range(self.num_dcs):
+            current_node = min((node for node in range(self.num_dcs) if node not in visited), 
+                               key=lambda node: distances[node], default=None)
+            if current_node is None or current_node == dst:
+                break
+            visited.add(current_node)
+      
+            for neighbor in range(self.num_dcs):
+                if neighbor in visited:
+                    continue
+                available_bw = self.get_available_bw(current_node, neighbor)
+                if available_bw >= bw:
+                    alt_distance = distances[current_node] + 1
+                    if alt_distance < distances[neighbor]:
+                        distances[neighbor] = alt_distance
+                        previous_nodes[neighbor] = current_node
+        
+        # reconstruct path
+        current_node = dst
+        while current_node is not None:
+            path.insert(0, current_node)
+            current_node = previous_nodes[current_node]
+        if path[0] == src:
+            return path
+        return []
     
     def reset(self):
         self.dcs = [DataCenter(i, np.random.randint(*DC_CONFIG['cpu_range'])) 
