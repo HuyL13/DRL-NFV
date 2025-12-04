@@ -1,0 +1,671 @@
+IEEE NETWORKING LETTERS, VOL. 6, NO. 3, SEPTEMBER 2024
+193
+Unlocking Reconﬁgurability for Deep Reinforcement
+Learning in SFC Provisioning
+Murat Arda Onsu, Poonam Lohan, Member, IEEE, Burak Kantarci
+, Senior Member, IEEE,
+Emil Janulewicz
+, and Sergio Slobodrian
+Abstract—Network function virtualization (NFV) is a key
+foundational technology for 5G and beyond networks, wherein to
+offer network services, execution of Virtual Network Functions
+(VNFs) in a deﬁned sequence is crucial for high-quality Service
+Function Chaining (SFC) provisioning. To provide fast, reli-
+able, and automatic VNFs placement, Machine Learning (ML)
+algorithms such as Deep Reinforcement Learning (DRL) are
+widely being investigated. However, due to the requirement of
+ﬁxed-size inputs in DRL models, these algorithms are highly
+dependent on network conﬁguration such as the number of
+data centers (DCs) where VNFs can be placed and the logical
+connections among DCs. In this letter, a novel approach using the
+DRL technique is proposed for SFC provisioning which unlocks
+the reconﬁgurability of the networks, i.e., the same proposed
+model can be applied in different network conﬁgurations without
+additional training. Moreover, an advanced Deep Neural Network
+(DNN) architecture is constructed for DRL with an attention
+layer that improves the performance of SFC provisioning while
+considering the efﬁcient resource utilization and the End-to-End
+(E2E) delay of SFC requests by looking up their priority points.
+Numerical results demonstrate that the proposed model surpasses
+the baseline heuristic method with an increase in the overall
+SFC acceptance ratio by 20.3% and a reduction in resource
+consumption and E2E delay by 50% and 42.65%, respectively.
+Index Terms—SFC provisioning, NFV, VNF-placement, deep-Q
+learning, 5G and beyond network, priority points.
+I. INTRODUCTION
+T
+HE RATIONALE for Network Function Virtualization
+(NFV) is shifting physical network equipment to general-
+purpose hardware, which is known as data centers (DCs), and
+running Virtual network functions (VNFs) on virtual machines
+installed in these DCs [1], [2]. Some primary VNFs can
+be listed as Network Address Translation (NAT), Firewall
+(FW), Intrusion Detection and Prevention System (IDPS),
+WAN Optimizer (WO), Video Optimization Controller (VOC),
+and Trafﬁc Monitor (TM), etc. These VNFs can be chained
+Manuscript received 26 April 2024; accepted 10 May 2024. Date of
+publication 13 May 2024; date of current version 25 October 2024. This
+work was supported in part by the Mitacs Accelerate Program under Project
+IT32016, and in part by the Natural Sciences and Engineering Research
+Council of Canada (NSERC) Alliance ALLRP 576762—22 Project and
+NSERC CREATE TRAVERSAL Program. The associate editor coordinating
+the review of this article and approving it for publication was N. Passas.
+(Corresponding author: Burak Kantarci.)
+Murat Arda Onsu, Poonam Lohan, and Burak Kantarci are with the
+School of Electrical Engineering and Computer Science, University of
+Ottawa, Ottawa, ON K1N 6N5, Canada (e-mail: monsu022@uottawa.ca;
+ppoonam@uottawa.ca; burak.kantarci@uottawa.ca).
+Emil Janulewicz is with the Product Line Management, Ciena, Kanata, ON
+K2K 2P5, Canada (e-mail: ejanulew@ciena.com).
+Sergio Slobodrian is with the Ofﬁce of the CTO, Ciena, Kanata, ON K2K
+2P5, Canada (e-mail: sslobodr@ciena.com).
+Digital Object Identiﬁer 10.1109/LNET.2024.3400764
+in a particular order to create Service Function Chaining
+(SFC) requests to provide specialized network services such
+as Cloud Gaming (CG), Augmented Reality (AR), Video
+Streaming (VS), VoIP, Massive IoT (MIoT), and Industry 4.0
+(Ind 4.0) [3]. SFC Provisioning entails some key challenges
+like sequential VNF execution, efﬁcient resource utilization,
+massive demands handling, and End-to-End (E2E) delay con-
+straints [4], [5].
+In [6], researchers studied delay-aware VNF migration
+for embedding SFCs in a network with limited processing
+resources. A queuing-based system model with latency as a
+KPI is proposed in [7]. In [8], DRL combined with graph neu-
+ral networks optimizes VNF placement for resource utilization
+and QoS. Load balancing of SFC provisioning in Fog networks
+is explored in [5]. Deep Learning (DL) and RL algorithms
+are highly suitable for addressing SFC provisioning with VNF
+placement challenges. These models can develop advanced
+methods while prioritizing minimal resource usage and E2E
+delay [9], [10], offering potential beneﬁts for various practical
+applications such as SFC provisioning in 5G Core Networks.
+The DL model requires a ﬁxed size of input states, which will
+be the information about the environment, such as incoming
+SFC demands, DCs’ resources, logical links availability, etc.
+Furthermore, the output of the model indicates the action
+spaces of the DRL algorithm. Therefore, model architecture
+highly relies on the network conﬁguration and parameters.
+Although DRL models with near-optimal performance for
+VNF placements have been studied, running these models
+with different network conﬁgurations (NCs) is not well-studied
+in literature. Following upon updates in NCs, such as the
+addition or removal of DCs and logical links among them, the
+inputs and outputs of the model are impacted; for example,
+adding more DCs increases the input size and action space.
+Therefore, model architecture should be changed to adapt
+to these changes, and the new model needs to be trained
+from the beginning, which is time-consuming. To the best
+of our knowledge, this letter is the ﬁrst one to unlock the
+reconﬁgurability of the DRL-based model for efﬁcient SFC
+provisioning which allows the same proposed DRL model to
+be utilized in different network conﬁgurations (NCs) without
+retraining it. The four-fold contributions of this letter are as
+follows:
+• A novel DRL architecture, which includes multiple input
+states, is proposed for the SFC provisioning task. Its
+initial layer consists of three different input layers, which
+are concatenated in one point of the model to avoid any
+information loss or inefﬁciency in computation due to
+their different dimensions and attributes.
+• Each DC is assigned priority points based on its resource
+availability, its occurrence from source to destination
+path, and already installed and allocated VNF functions
+on it. Furthermore, the VNFs are prioritized for placement
+2576-3156 c⃝2024 IEEE. Personal use is permitted, but republication/redistribution requires IEEE permission.
+See https://www.ieee.org/publications/rights/index.html for more information.
+Authorized licensed use limited to: CSIRO Information Technology Services. Downloaded on December 01,2025 at 06:42:49 UTC from IEEE Xplore.  Restrictions apply. 
+194
+IEEE NETWORKING LETTERS, VOL. 6, NO. 3, SEPTEMBER 2024
+Fig. 1.
+SFC demand creation, DRL model and training.
+based on their SFC type, their order in the SFC chain,
+and E2E delay constraints.
+• The proposed model can handle massive amounts of
+different SFC requests with efﬁcient and sequential VNF
+placements in the chains. It provides high SFC acceptance
+ratio with low resource consumption while fulﬁlling the
+stringent E2E delay constraints of SFC requests. The
+trained model can be utilized under different NCs.
+II. SYSTEM MODEL AND PROBLEM FORMULATION
+A. System Model and Characteristics of SFCs and VNFs
+Fig. 1 illustrates the network environment which consists
+of multiple data centers (DCs) connecting with base stations
+through which users’ equipment can put their different types
+of service requests to the network. All DCs are considered
+VNF-instance (VNFI)-enabled, i.e., VNFs can be installed
+and allocated to different SFC requests by DCs as per the
+requirements depending on their computational and storage
+resource availability. Further, we consider that all types of SFC
+requests coming to the network are in the form of request
+bundles, i.e., multiple different types of users’ requests are
+considered to address massive demands which network should
+be able to handle within their E2E delay limit. Hence, the
+VNF placement and resource utilization should be efﬁcient
+enough to maximize the acceptance ratio (AccRatio) of the
+SFC requests. The considered network topology is mapped
+to graph G(N, L), where N and L denote the set of VNFI-
+enabled DCs and logical links among nodes, respectively.
+The matrix W = |N|X |N| represents the distance weight
+of logical links among DCs, where the matrix element wij
+represents the distance weight between DCs i and j in the
+network. The bandwidth (BW) capacity of the link between
+DCs i and j is denoted by Bij Mbps. The computational
+capacity of DC i ∈N is represented by Qi →cycles/sec
+based on the number of CPUs and RAM resources in DC. Si
+represents the storage capacity of DC i ∈N in GB. Now, we
+discuss the characteristics of SFC Requests and VNFs.The set
+of service types supported by the service provider is denoted
+by S = {CG, AR, VS, VoIP, MIoT, Ind 4.0}. Please note SFC
+types or tags are deﬁned based on this set. The set of all VNFs
+is presented by V = {NAT, FW, VOC, TM, WO, IDPS}.
+Fs = (f s
+1 →f s
+2 →· · · f s
+Ns) for s ∈S represents a sequence of
+Ns VNFs to be executed for successful completion of request
+s ∈S. Furthermore, characteristics of each service request s ∈
+S is deﬁned by a tuple {Fs, Bs, Ds, λs}, where Bs denotes
+BW requirement, Ds denoted E2E Delay tolerance, and λs
+denotes the request bundle size. We used the most commonly
+referenced six SFCs or service requests of the literature [11]
+as outlined in Table I with their characteristics tuple. Also,
+Table II demonstrates the resource requirements in terms of
+CPUs, RAM, and Storage resources and the processing time
+TABLE I
+SERVICE FUNCTION CHAIN (SFC) CHARACTERISTICS [10]
+TABLE II
+VIRTUAL NETWORK FUNCTION CHARACTERISTICS [10]
+for each VNF [11]. It is assumed that multiple same or
+different VNFI can be placed/installed to each DC and can
+be allocated to different SFC requests s ∈S. To process a
+particular VNF of an SFC, the same type VNFI should be
+installed in a DC, and that VNFI must be allocated to that
+particular VNF till its processing time is over. Another VNF
+of the same type from a different SFC can be allocated to that
+VNFI after the previously allocated VNF processing is over
+or it can use another free installed VNFI of its type. nv
+i is
+an integer variable representing the number of VNFI v ∈V
+placed on DC i ∈N. The computational, storage resource
+requirement, and processing time for VNFI v ∈V are denoted
+by C v, S v, and tv respectively.
+B. Problem Formulation
+With As denoting the number of SFC requests served of
+type s ∈S, the AccRatio, Ar = 
+s∈S As/
+s∈S λs, can be
+deﬁned as the total number of all types of SFC requests served
+within their E2E delay limit divided by the total number of
+generated requests by all types of request bundles. Now, the
+mathematical formulation for SFCs’ AccRatio maximization
+is represented as follows:
+(P): maximize
+n,δ
+Ar
+s. t. : (C1):
+
+v∈V
+nv
+i C v ≤Qi, ∀i ∈N
+(C2):
+
+v∈V
+nv
+i S v ≤Si, ∀i ∈N
+(C3):
+
+i∈N
+δ
+f s
+k
+i 1
+
+n
+f s
+k
+i
+> 0
+
+= 1, ∀s ∈S, ∀k = 1, 2, . . . , Ns
+(C4):
+
+λs∀s∈S
+Ns−1
+
+k=1
+δ
+f s
+k
+i δ
+f s
+k+1
+j
+Bs ≤Bij , ∀i, j ∈N, i ̸= j
+(C5): ts
+Pg + ts
+Pr ≤Ds ; ∀s ∈S
+Here, constraints (C1) and (C2), respectively, state that
+the computational and storage capacity of the placed VNFIs
+should not be greater than the total computational and storage
+capacity of DCs. Constraint (C3) ensures that each VNF
+function in SFCR s should be processed by only one DC;
+where, δf s
+k
+i
+is a binary variable which is set equal to 1 if
+kth VNF in SFC s is processed at node i with condition
+Authorized licensed use limited to: CSIRO Information Technology Services. Downloaded on December 01,2025 at 06:42:49 UTC from IEEE Xplore.  Restrictions apply. 
+ONSU et al.: UNLOCKING RECONFIGURABILITY FOR DRL IN SFC PROVISIONING
+195
+(nf s
+k
+ic
+> 0); otherwise, it is set to zero. Constraint (C4)
+is related to logical link BW constraint and states that the
+BW resource occupied by SFCRs should not exceed the BW
+capacity of logical links. Lastly, constraint (C5) conﬁrms that
+for successful completion of the SFC request the propagation
+and processing delay of SFC should not be more than the E2E
+delay tolerance limit of that SFC request. Propagation delay,
+ts
+Pg = Ns−1
+k=1
+
+i∈N
+
+j∈N δf s
+k
+i δ
+f s
+k+1
+j
+tP
+ij , depends upon the
+distance between VNF serving nodes in SFC request s and
+the speed of light as normally the optical ﬁber is used to
+provide a logical link among DCs, i.e., tP
+ij
+= wij /c with
+c = 3 ∗108km/s, i.e., equal to the speed of light. Processing
+delay, ts
+Pr = Ns
+k=1
+
+i∈N δf s
+k
+i (wf s
+k + tf s
+k ), depends upon the
+waiting time, wf s
+k , before allocation and processing time, tf s
+k ,
+of different VNF functions to be executed in the SFC request
+s ∈S. The optimization problem P is combinatorial and non-
+convex. To solve this problem, we propose a novel DRL-based
+SFC provisioning algorithm.
+III. DRL ARCHITECTURE AND SFC PROVISIONING
+A. Proposed DRL Algorithm and Model Architecture
+The Deep Q-Network (DQN) algorithm is applied as an
+advanced RL approach that employs deep learning to estimate
+the optimal action-value function, often denoted as the Q-
+value. The model architecture employs fully connected deep
+neural network (FCDNN) layers. It consists of three input lay-
+ers designed to accommodate diverse system information types
+and dimensions. After passing through the initial FCDNN
+layers, these inputs are concatenated to form a uniﬁed input.
+Subsequently, an attention layer is applied to highlight signif-
+icant features within this combined input. The state serves as
+input, while the DQN model generates actions. Based on these
+actions, an agent can receive rewards and Q-values, aiming to
+maximize the action-value function during the update phase.
+1) State Deﬁnition: In RL, the state, representing environ-
+ment information and input, is updated after each action and
+DRL employs a DNN that requires inputs in array format with
+consistent shape and size. However, SFC Provisioning involves
+diverse state information, posing a challenge for integration
+due to varying sizes and features. To ensure information
+integrity, multiple input layers are created for DRL models.
+In this letter, three input layers are created for state
+information: the ﬁrst and second inputs describe the chosen
+DC with the highest priority for action, while the third
+input provides information on overall SFC requests in the
+environment. (i) The ﬁrst input state provides the total number
+of installed VNFs and VNFs available to be allocated for each
+type, along with available storage and computational power,
+for speciﬁc DC, which model acts. The matrix dimension of
+the ﬁrst input state is [1 × (2 ∗|V | + 2)]. (ii) The second
+input state is related to SFCs processing stages by that speciﬁc
+DC. For an SFC request, If any VNF function is allocated
+in that DC, state information shows the SFC request type,
+already allocated VNF functions, and the remaining VNF
+functions waiting for allocation in the chain of that SFC
+request. This information is presented for all types of SFC
+requests. Hence, the matrix dimension of the second input
+state is [|S| × (1 + 2 ∗|V |)]. (iii) Lastly, the third input state
+provides information about all types of pending SFC requests.
+It includes information about SFC type, SFC request counts
+in each type, remaining minimum E2E latency time, BW
+requirement, and the total number of different VNFs waiting
+for allocation to serve those SFC request types. The matrix
+dimension of the third input state is [|S|×(4+|V |)]. Unlocking
+reconﬁgurability means that the DRL model input states are
+independent of environmental changes. For our proposed DRL
+model, with the change in network conﬁguration, i.e., numbers
+of DCs and logical links, the input state dimensions do not
+change. The proposed DRL model preserves its input and
+output layer architecture and does not need retraining to be
+applied to different NCs.
+2) Action Deﬁnition: In the proposed DRL model, the
+output layer deﬁnes the agent actions, including Uninstall and
+Allocation for each VNF type, along with an idle action Wait.
+The dimension of the output layer array for actions is [2 ∗
+|V | + 1]. Multiple actions can be performed simultaneously
+to fulﬁll demands within the same time-stamp.
+3) Reward Deﬁnition: The model receives a high reward
+when it fulﬁlls SFC requests within the E2E delay limit.
+Inability to satisfy a request results in dropped SFCs, and
+a penalty is incurred. This penalty is slightly less than the
+reward to account for situations where VNF allocation does
+not represent a wrong action, even if the SFC is ultimately
+dropped. Additionally, uninstalling VNFs required by ongoing
+requests incurs a penalty. Selecting invalid actions, such
+as attempting to install VNF functions without available
+resources, also results in penalties. Invalid actions do not alter
+state information, causing the model to remain on the same
+action until the next step. The reward function is as follows:
+Reward =
+⎧
+⎪
+⎪
+⎪
+⎨
+⎪
+⎪
+⎪
+⎩
++2.0
+if SFC is Satisﬁed
+−1.5
+if SFC is Dropped
+−1.0
+if Invalid Action
+−0.5
+if Uninstallation of RequiredVNF
+0
+otherwise
+4) DRL Model Training: has U (i.e., 350) updates, and
+each update is performed after E (i.e., 20) episodes. Each
+episode starts with incoming SFC requests and ends once
+there are no pending SFC requests. Regarding SFC request
+generation, at the onset and intervals of every N, i.e., 4 Steps,
+the simulation generates SFC requests randomly within the
+speciﬁed range of bundle size B as presented in Table I.
+SFC requests are allocated with various source and desti-
+nation points. They are removed from the state if they are
+either served by allocating all VNF functions in the correct
+sequence or dropped due to E2E delay or resource constraints.
+Additionally, the number of incoming SFC requests and
+data center counts vary in each episode to enhance training
+robustness and diversity. The model performs A actions
+(i.e., A = 100), during each step, which is of duration T, 1
+ms. Every action inference time stamp is 0.01ms. At the end
+of each episode, the model stores the state, action, next state,
+and reward observation set to the replay memory. In initial
+episodes, randomness plays crucial role for training,then in
+each episodes number of random actions are decreased and
+replaced by deterministic actions.
+B. Proposed SFC Provisioning Algorithm
+The proposed SFC provisioning solution, outlined as
+Algorithm 1, utilizes the DRL model that is discussed in
+the previous subsection. Whenever new SFC requests are
+generated with their source and destination information, the
+model starts running to satisfy these demands by placing
+Authorized licensed use limited to: CSIRO Information Technology Services. Downloaded on December 01,2025 at 06:42:49 UTC from IEEE Xplore.  Restrictions apply. 
+196
+IEEE NETWORKING LETTERS, VOL. 6, NO. 3, SEPTEMBER 2024
+Fig. 2.
+Comparison of the proposed DRL-Based SFC provisioning algorithm against the baseline approach.
+Algorithm 1: VNF Placement for SFC Provisioning
+Data: Overall_SFCs_req_Info, Overall_VNF_Info, Overall_DC_Info
+Result: SFCs requests ←accepted or dropped
+1 DC_list ←Set_DC_priority(Overall_VNF_Info);
+2 DC_id ←dc_list[0];
+3 State_1 ←get_Curr_DC_Info(Overall_DC_Info, DC_id);
+4 State_2 ←get_DC_SFC_Info(Overall_VNF_Info, DC_id);
+5 State_3 ←get_Overall_SFC_Info(Overall_VNF_Info);
+6 Action ←DRL_Model(Input_1, Input_2, Input_3);
+7 Action_Type ←GetActionType(Action);
+8 if Action_Type = Wait then
+9
+Perform(wait)
+10 end
+11 if Action_Type = Uninstall then
+12
+VNF_Type ←GetVNFType(Action);
+13
+Asserts if any idle function with VNF_Type in Curr_DC;
+14
+Asserts if no VNF waiting to be allocated with selected
+VNF_Type;
+15
+Perform(Uninstall, DC_id, VNF_Type)$;
+16 end
+17 if Action_Type = Allocation then
+18
+VNF_Type ←GetVNFType(Action);
+19
+Asserts if resources are available for VNF_Type in Curr_DC;
+20
+Asserts if VNFs waiting to be allocated with selected VNF_Type;
+21
+VNF_Priority_List ←[];
+22
+foreach VNFt of VNF_Type ∈Overall_VNF_Info do
+23
+Priority ←0;
+24
+P1 ←RemTime(VNFt, T_AfterReq, E2E_Time);
+25
+P2 ←SFC_based_priority(VNFt, DC_id);
+26
+P3 ←Urgency(VNFt, T_AfterReq, E2E_Time, Thr);
+27
+Priority ←P1 + P2 + P3;
+28
+VNF_Priority_List.insert(VNFt, Priority);
+29
+end
+30
+VNF_Selected ←HigestPriority(VNF_Priority_List);
+31
+Perform(Allocation, DC_id, VNF_Selected);
+32 end
+33 Rewards, Next_States1,2,3 ←CalculateUpdatedInfo();
+34 Replay_Memory ←
+[States1,2,3, Action, Rewards, Next_States1,2,3];
+and allocating VNFs in the chain to the appropriate DCs.
+The DRL model traverses through DCs for efﬁcient VNF
+placements. DCs’ iteration order is deﬁned by their priority
+points which depend on the available resources and incoming
+SFC requests’ E2E delay, and it picks the source DC with
+minimum E2E delay SFC requests to the highest priority. The
+DCs on the shortest available path based on BW resource
+availability between the source and destination of that SFC
+request are provided with decreasing priority values. If DCs
+do not come on the path, they are put at the end of the iteration
+order. The DRL model selects the DC with the highest priority
+as its current DC (step 2), and its input states are updated
+accordingly (Steps 3-5). The iteration order of DCs is updated
+after every action, and the model can visit one DC more than
+once during the same step because multiple actions are taken
+in one step. Based on the input states, the DRL model provides
+the action output (Step 6) for the current DC.
+The models’ action space consists of allocation of VNFs,
+uninstallation of VNFs, and idle wait. The output of the DRL
+model deﬁnes the VNF type on which it will act (Step 7). If
+the action output is ‘wait’, no action would be performed in
+that time stamp (Steps 8-10). If the action output is ‘uninstall’,
+ﬁrst, the VNF type is collected from the output action. It is
+checked that there is any idle installed VNF of that type, then
+that type VNF is uninstalled to reduce unnecessary resource
+consumption of the current DC (Steps 11-16). If the action
+output is ‘Allocation’, ﬁrst, the VNF type is extracted from
+the model output. Then, the algorithm asserts if the action
+is valid by looking up the resource availability and existing
+request counts for that VNF type (Steps 17-20). Since many
+VNFs may be waiting for allocation, all VNFs of that type
+are assigned priority points. The priority point’s main aim
+is to give higher priority to the VNF of that SFC request
+whose previous VNFs in the chain are already allocated to the
+same DC or the SFC request having minimum remaining E2E
+latency time. Three different types of points P1, P2, P3 are
+used to calculate priority values P = P1 + P2 + P3 (Steps
+23-29). (i) The ﬁrst point, P1, depends on the remaining time
+to serve that SFC request s, which is calculated by subtracting
+the E2E delay tolerance value Ds from the time elapsed
+TE s after this SFC request was created P1 = TE s −Ds.
+This point increases in every following timestamp. (ii) The
+second point, P2, emphasizes the importance of VNF based
+on its SFC request. If any of the VNFs in the SFC chain
+are installed in the current DC, they have high priority, but
+if they are allocated to other DCs, they degrade that VNF’s
+priority. (iii) Finally, the third priority point, P3 indicates
+VNF’s urgency. If the remaining time to serve its SFC request
+is lower than the threshold Thr, then, even if the other VNFs
+of the SFC chain are allocated to other DCs, VNF priority
+is increased signiﬁcantly for its allocation. It is calculated by
+dividing a constant value C by the remaining time, P3 =
+C/(Ds −TE s+), is a very small number to avoid division
+by zero. Once priority functions assign all VNFs of the output
+VNF type, the VNF with the maximum priority is selected
+to perform the allocation action. After performing the action,
+the reward and next states are updated (Step 34) and stored in
+the replay buffer for training the model (Step 35). For testing
+purposes, the steps of the algorithm are repeated till the time
+there are no pending SFC requests in the network, i.e., either
+they are satisﬁed or dropped.
+IV. PERFORMANCE EVALUATION
+The simulation includes DCs, ﬁber connections as logical
+links between DCs, SFCs requests with speciﬁc VNFs chains.
+Each DC has a storage capacity of 2 TB, the CPU varies
+Authorized licensed use limited to: CSIRO Information Technology Services. Downloaded on December 01,2025 at 06:42:49 UTC from IEEE Xplore.  Restrictions apply. 
+ONSU et al.: UNLOCKING RECONFIGURABILITY FOR DRL IN SFC PROVISIONING
+197
+Fig. 3.
+E2E delay and resource consumption for different NCs.
+between 12 to 120 GHz, and the RAM is 256 GB, while the
+logical links have 1 Gbps BW.
+The baseline heuristic model depends on a rule-based
+algorithm that starts with placing VNF functions of the SFC
+request with minimum E2E latency and continues until all
+VNFs of the SFC are placed properly. Then, it proceeds with
+placing the VNFs of the next SFC request. Unlike the proposed
+model, it does not iterate all DCs but performs its actions by
+looking up all network dynamics, including all VNFs and DCs.
+However, this baseline algorithm increases model inference
+time and constrains the model to perform fewer actions than
+the proposed model.
+To proposed model is compared to the baseline model
+for the same amount of SFC requests and with the same
+resources of 4 DCs. Comparison is made in terms of E2E
+delay, SFCs requests AccRatio, and resource consumption. For
+evaluation, a massive amount of request bundles of different
+SFC types are created following the bundle sizes provided
+in Table I. These request bundles of different SFC types are
+created for 3 consecutive time slots, called 3 request counts
+and their compiled AccRatio are illustrated in the middle graph
+of Fig. 2. It can be seen that both the heuristic and DRL
+model satisfy all CG and VoIP requests. The DRL model
+satisﬁes a greater amount of AR and VS than the baseline
+model. Moreover, it also handled MIoT and Ind 4.0 better
+than heuristic algorithms. Therefore, the DRL model satisﬁes
+overall 20.3% more SFC requests with the same resources.
+Since each SFC type has a different amount of requests, the
+weighted average of AccRatio of all SFC types is presented,
+which is 76.93% and 90.08% for baseline and DRL models,
+respectively. Hence, there is a 13.14% improvement in the
+weighted average AccRatio by the proposed DRL algorithm.
+The left graph in Fig. 2 shows the E2E latency for satisﬁed
+SFC requests. Since E2E latency tolerance for AR, MIoT, and
+Ind 4.0 is less, both algorithms try to handle them ﬁrst; that’s
+why latency for these types is almost similar. However, the
+DRL model fulﬁlls the rest of these demands much faster than
+the baseline model and achieves a 42.65% faster E2E delay.
+Finally, since the DRL model can do planning better than
+the rule-based model in terms of strategically uninstalling and
+allocating VNF functions, it consumes almost 50% less storage
+and 10% less computational resources. Since the AccRatio of
+AR is lower in the baseline approach and the graph shows E2E
+latency only for accepted SFC requests, E2E latency for AR
+in the baseline algorithm is slightly lower than DRL model.
+To observe the robustness of the proposed DRL model, it is
+tested under different NCs. The effect of DCs count on E2E
+delay and resource consumption can be seen in Fig. 3. For
+each conﬁguration, the proposed model is tested with the same
+amount of SFC requests, i.e., 3 request counts. It can be seen
+in Fig. 3 that more resources are utilized per DC when the
+DCs count is 2, and it decreases as the DCs count increases.
+In the same manner, the E2E latency for SFC provisioning
+tasks is higher with the lower the DCs count. Since, with more
+Fig. 4.
+SFCs AccRatio under different SFCs request counts and NCs.
+DCs, resources increase to satisfy the SFCs requests and load
+per DC decreases.
+As demonstrated in the left graph of Fig. 4, the incoming
+SFC requests can be handled almost completely with a higher
+DCs count. However, with low resources, such as 2 and 4
+DCs, the system struggles to satisfy all these demands, and
+a lower overall AccRatio can be seen as the request counts
+increase. The right side graph in Fig. 4 shows the complied
+results up to 3 consecutive request counts for the AccRatio of
+every SFC type. Except for a system with 2 DCs, all VoIP and
+VS requests are satisﬁed, and CG is also handled completely in
+every conﬁguration. Most of the dropped ratio can be observed
+for types of AR, MIoT, and Ind 4.0. When the number of DCs
+is reduced, it affects an extreme amount of resource reductions,
+which prevents VNF functions from being properly installed
+and causes a high drop ratio for requests with lower E2E
+latency tolerance.
+V. CONCLUSION
+In this letter, which unlocks the network reconﬁgurability
+without retraining the proposed DRL model. SFC requests are
+satisﬁed by placing and allocating VNF functions in the proper
+chaining sequence to DCs while considering their resource
+constraints. With a better strategy of prioritizing DCs and
+SFCs having a lower E2E delay tolerance, the proposed model
+surpasses the baseline approach in terms of acceptance ratio,
+resource consumption, and E2E latency.
+REFERENCES
+[1] R. Mijumbi et al., “Network function virtualization: State-of-the-art
+and research challenges,” IEEE Commun. Surveys Tuts., vol. 18, no. 1,
+pp. 236–262, 1st Quart., 2016.
+[2] I. Avgouleas et al., “Virtual network functions scheduling under delay-
+weighted pricing,” IEEE Netw. Lett., vol. 1, no. 4, pp. 160–163,
+Dec. 2019.
+[3] K. Kaur et al., “A comprehensive survey of service function chain
+provisioning approaches in SDN and NFV architecture,” Comput. Sci.
+Rev., vol. 38, Nov. 2020, Art. no. 100298.
+[4] N. Siasi et al., “Service function chain provisioning schemes for
+multi-layer fog networks,” IEEE Netw. Lett., vol. 2, no. 1, pp. 38–42,
+Mar. 2020.
+[5] M. A. Jasim et al., “SFC provisioning with load balancing method in
+multi-tier fog networks,” IEEE Netw. Lett., vol. 4, no. 2, pp. 82–86,
+Jun. 2022.
+[6] M. Setayesh and V. W. Wong, “Service function chain reconﬁguration in
+5G core networks using deep learning,” in Proc. IEEE Global Commun.
+Conf. (GLOBECOM), 2021, pp. 1–6.
+[7] S. Agarwal et al., “Joint VNF placement and CPU allocation in
+5G,” in Proc. IEEE Conf. Comput. Commun., 2018, pp. 1943–1951.
+[8] P. Sun et al., “Combining deep reinforcement learning with graph neural
+networks for optimal VNF placement,” IEEE Wireless Commun. Lett.,
+vol. 25, no. 1, pp. 176–180, Jan. 2021.
+[9] D. Lee et al., “Q-learning based service function chaining using VNF
+resource-aware reward model,” in Proc. Asia–Paciﬁc Netw. Oper. Manag.
+Symp., 2020, pp. 279–282.
+[10] N. He et al., “Leveraging deep reinforcement learning with attention
+mechanism for virtual network function placement and routing,” IEEE
+Trans. Parallel Distrib. Syst., vol. 34, no. 4, pp. 1186–1201, Apr. 2023.
+[11] J. M. Ziazet et al., “A dynamic trafﬁc generator for elastic 5G network
+slicing,” in Proc. IEEE Int. Symp. Meas. Netw., 2022, pp. 1–6.
+Authorized licensed use limited to: CSIRO Information Technology Services. Downloaded on December 01,2025 at 06:42:49 UTC from IEEE Xplore.  Restrictions apply. 

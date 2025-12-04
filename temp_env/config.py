@@ -38,5 +38,6 @@ TRAINING_CONFIG = {
     'vae_latent_dim': 32,
     'epsilon_start': 1.0,
     'epsilon_end': 0.01,
-    'epsilon_decay': 0.995
+    'epsilon_decay': 0.995,
+    'P3_CONSTANT': 50.0,
 }

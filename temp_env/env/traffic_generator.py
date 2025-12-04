@@ -15,6 +15,9 @@ class SFCRequest:
         self.placement = []
         self.elapsed_time = 0
         self.active = True
+        self.shortest_path=[]
+        
+
         
     def get_current_vnf(self):
         if self.current_vnf_idx < len(self.chain):
