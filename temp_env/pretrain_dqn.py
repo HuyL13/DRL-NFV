@@ -9,6 +9,11 @@ This implementation follows exactly Algorithm 1 and the training procedure descr
 - Step duration T = 1ms
 - Action inference time = 0.01ms
 - SFC generation every N = 4 steps
+
+Key components from Algorithm 1:
+- DC Priority based on resources, E2E delay, and path availability
+- VNF Priority using P1 (remaining time), P2 (SFC-based), P3 (urgency)
+- Proper Allocation action that selects highest priority VNF
 """
 
 import numpy as np
@@ -28,7 +33,7 @@ from config import VNF_TYPES, VNF_SPECS, SFC_SPECS, TRAINING_CONFIG, DC_CONFIG
 # ============================================================================
 NUM_UPDATES = 350              # U = 350 updates
 EPISODES_PER_UPDATE = 20       # E = 20 episodes per update
-ACTIONS_PER_STEP = 20          # Reduced from 100 for faster training
+ACTIONS_PER_STEP = 100         # A = 100 actions per step (as per paper)
 STEP_DURATION = 1              # T = 1 ms
 ACTION_INFERENCE_TIME = 0.01   # 0.01 ms per action inference
 SFC_GENERATION_INTERVAL = 4    # N = 4 steps between SFC generation
@@ -46,67 +51,81 @@ REWARD_UNINSTALL_REQUIRED_VNF = -0.5
 
 class SFCProvisioningEnv:
     """
-    Environment for SFC Provisioning following the paper's system model.
-    Uses the same dynamics as main.py - process one SFC at a time.
+    Environment for SFC Provisioning following the paper's system model and Algorithm 1.
+    
+    Key differences from simplified version:
+    1. Processes ALL pending SFCs, not just one
+    2. DC priority based on resources + E2E delay + path
+    3. VNF priority using P1 + P2 + P3 formula
+    4. Generates new SFCs every N=4 steps
     """
     
     def __init__(self, num_dcs=4):
         self.num_dcs = num_dcs
         self.network = CoreNetwork(num_dcs)
         self.traffic_gen = TrafficGenerator(num_dcs)
-        self.current_sfc = None  # Process ONE SFC at a time like main.py
+        
         self.step_count = 0
-        self.current_time = 0
+        self.current_time = 0  # Current simulation time in ms
         
         # State dimensions from paper
-        self.num_vnf_types = len(VNF_TYPES)  # |V|
-        self.num_sfc_types = len(SFC_SPECS)   # |S|
+        self.num_vnf_types = len(VNF_TYPES)  # |V| = 6
+        self.num_sfc_types = len(SFC_SPECS)   # |S| = 6
         
-        # State 1: [1 × (2*|V| + 2)]
+        # State 1: [1 × (2*|V| + 2)] - Current DC info
         self.state1_dim = 2 * self.num_vnf_types + 2
         
-        # State 2: [|S| × (1 + 2*|V|)] - flattened
+        # State 2: [|S| × (1 + 2*|V|)] - SFC processing by current DC
         self.state2_dim = self.num_sfc_types * (1 + 2 * self.num_vnf_types)
         
-        # State 3: [|S| × (4 + |V|)] - flattened
+        # State 3: [|S| × (4 + |V|)] - Overall pending SFC info
         self.state3_dim = self.num_sfc_types * (4 + self.num_vnf_types)
         
-        # Action space: 2*|V| + 1
+        # Action space: 2*|V| + 1 (Install + Uninstall + Wait)
         self.num_actions = 2 * self.num_vnf_types + 1
+        
+        # Track statistics
+        self.sfcs_satisfied = 0
+        self.sfcs_dropped = 0
+        self.sfcs_total = 0
         
     def reset(self):
         """Reset environment for new episode."""
         self.network.reset()
-        self.traffic_gen.active_sfcs = []
-        self.current_sfc = None
+        self.traffic_gen = TrafficGenerator(self.num_dcs)
         self.step_count = 0
         self.current_time = 0
+        self.sfcs_satisfied = 0
+        self.sfcs_dropped = 0
+        self.sfcs_total = 0
         
-        # Generate initial SFC requests using TrafficGenerator's generate_bundle
-        self.traffic_gen.generate_bundle(request_count=1)
-        if len(self.traffic_gen.active_sfcs) > 0:
-            self.current_sfc = self.traffic_gen.active_sfcs[0]
+        # Generate initial SFC requests (request_count=1 means one bundle)
+        new_sfcs = self.traffic_gen.generate_bundle(request_count=1)
+        self.sfcs_total += len(new_sfcs)
+        
+        # Assign shortest paths to all SFCs
+        for sfc in self.traffic_gen.active_sfcs:
+            sfc.shortest_path = self.network.get_shortest_path(sfc.src, sfc.dst, sfc.bw)
         
         return self._get_state(0)
     
     def _get_state1(self, dc_id):
         """
-        Get State 1: Current DC information.
-        [1 × (2*|V| + 2)] = installed VNFs for each type, available VNFs for each type, 
-        available storage, available computational power
+        Get State 1: Current DC information (Algorithm 1, Step 3)
+        [1 × (2*|V| + 2)] = installed VNFs + available VNFs + storage + CPU
         """
         dc = self.network.dcs[dc_id]
         state = []
         
-        # Installed VNFs for each type (normalized)
+        # Number of installed VNFs for each type (normalized)
         for vnf_type in VNF_TYPES:
             state.append(dc.installed_vnfs[vnf_type] / 10.0)
         
-        # Available VNFs for each type (installed - allocated)
+        # Number of available (idle) VNFs for each type
         for vnf_type in VNF_TYPES:
             installed = dc.installed_vnfs[vnf_type]
             allocated = sum(1 for v in dc.allocated_vnfs.values() if v == vnf_type)
-            available = installed - allocated
+            available = max(0, installed - allocated)
             state.append(available / 10.0)
         
         # Available storage and computational power (normalized)
@@ -117,48 +136,55 @@ class SFCProvisioningEnv:
     
     def _get_state2(self, dc_id):
         """
-        Get State 2: Current SFC state.
-        Uses current_sfc like main.py
+        Get State 2: SFC processing stages by current DC (Algorithm 1, Step 4)
+        [|S| × (1 + 2*|V|)] - For each SFC type: type encoding + allocated VNFs + remaining VNFs
         """
-        if self.current_sfc is None:
-            return np.zeros(self.state2_dim, dtype=np.float32)
-        
         sfc_types = list(SFC_SPECS.keys())
         state = []
         
         for sfc_type in sfc_types:
-            if self.current_sfc.type == sfc_type and dc_id in self.current_sfc.placement:
-                sfc = self.current_sfc
+            # Find SFCs of this type that have VNFs allocated at this DC
+            sfcs_at_dc = [sfc for sfc in self.traffic_gen.active_sfcs 
+                         if sfc.type == sfc_type and sfc.active and dc_id in sfc.placement]
+            
+            if sfcs_at_dc:
+                # Use the first one (could aggregate, but paper uses per-type info)
+                sfc = sfcs_at_dc[0]
+                
+                # SFC type encoding
                 state.append(sfc_types.index(sfc_type) / len(sfc_types))
                 
-                # Already allocated VNFs
+                # Already allocated VNFs (one-hot for each VNF type)
                 allocated_vnfs = [0] * self.num_vnf_types
                 for vnf_idx in range(sfc.current_vnf_idx):
                     vnf_type = sfc.chain[vnf_idx]
                     allocated_vnfs[VNF_TYPES.index(vnf_type)] = 1
                 state.extend(allocated_vnfs)
                 
-                # Remaining VNFs
+                # Remaining VNFs waiting for allocation
                 remaining_vnfs = [0] * self.num_vnf_types
                 for vnf_idx in range(sfc.current_vnf_idx, len(sfc.chain)):
                     vnf_type = sfc.chain[vnf_idx]
                     remaining_vnfs[VNF_TYPES.index(vnf_type)] = 1
                 state.extend(remaining_vnfs)
             else:
-                state.append(0)
-                state.extend([0] * self.num_vnf_types)
-                state.extend([0] * self.num_vnf_types)
+                # No SFCs of this type at this DC
+                state.append(sfc_types.index(sfc_type) / len(sfc_types))
+                state.extend([0] * self.num_vnf_types)  # No allocated VNFs
+                state.extend([0] * self.num_vnf_types)  # No remaining VNFs
         
         return np.array(state, dtype=np.float32)
     
     def _get_state3(self):
         """
-        Get State 3: Overall pending SFC requests information.
+        Get State 3: Overall pending SFC requests information (Algorithm 1, Step 5)
+        [|S| × (4 + |V|)] - For each SFC type: type + count + remaining delay + BW + waiting VNFs
         """
         sfc_types = list(SFC_SPECS.keys())
         state = []
         
         for sfc_type in sfc_types:
+            # Get all active SFCs of this type
             sfcs_of_type = [sfc for sfc in self.traffic_gen.active_sfcs 
                           if sfc.type == sfc_type and sfc.active]
             
@@ -176,7 +202,7 @@ class SFCProvisioningEnv:
                 # BW requirement (normalized)
                 state.append(SFC_SPECS[sfc_type]['bw'] / 100.0)
                 
-                # Total VNFs waiting for allocation for each type
+                # Total VNFs waiting for allocation for each VNF type
                 waiting_vnfs = [0] * self.num_vnf_types
                 for sfc in sfcs_of_type:
                     current_vnf = sfc.get_current_vnf()
@@ -197,8 +223,6 @@ class SFCProvisioningEnv:
     
     def _get_state(self, dc_id):
         """Get all three input states for the DRL model."""
-        if self.current_sfc is None:
-            return None, None, None
         state1 = self._get_state1(dc_id)
         state2 = self._get_state2(dc_id)
         state3 = self._get_state3()
@@ -206,123 +230,306 @@ class SFCProvisioningEnv:
     
     def set_dc_priority(self):
         """
-        Set DC priority based on current SFC.
+        Set DC priority based on Algorithm 1 description:
+        
+        "DCs' iteration order is defined by their priority points which depend on 
+        the available resources and incoming SFC requests' E2E delay, and it picks 
+        the source DC with minimum E2E delay SFC requests to the highest priority. 
+        The DCs on the shortest available path based on BW resource availability 
+        between source and destination of that SFC request are provided with 
+        decreasing priority values."
+        
+        Returns: List of DC IDs ordered by priority (highest first)
         """
-        if self.current_sfc is None:
+        if not self.traffic_gen.active_sfcs:
             return list(range(self.num_dcs))
         
-        # Get shortest path with BW constraint for current SFC
-        path = self.network.get_shortest_path(
-            self.current_sfc.src, 
-            self.current_sfc.dst, 
-            self.current_sfc.bw
-        )
+        # Find the SFC with minimum remaining E2E delay
+        active_sfcs = [sfc for sfc in self.traffic_gen.active_sfcs if sfc.active]
+        if not active_sfcs:
+            return list(range(self.num_dcs))
         
-        # Build priority list: path DCs first, then others
-        priority_list = path.copy() if path else [self.current_sfc.src]
+        # Sort SFCs by remaining delay (most urgent first)
+        active_sfcs.sort(key=lambda sfc: sfc.get_remaining_delay())
+        most_urgent_sfc = active_sfcs[0]
+        
+        # Get shortest path for the most urgent SFC
+        path = most_urgent_sfc.shortest_path
+        if not path:
+            path = self.network.get_shortest_path(
+                most_urgent_sfc.src, 
+                most_urgent_sfc.dst, 
+                most_urgent_sfc.bw
+            )
+            most_urgent_sfc.shortest_path = path
+        
+        # Build priority list
+        priority_list = []
+        dc_scores = {}
         
         for dc_id in range(self.num_dcs):
-            if dc_id not in priority_list:
-                priority_list.append(dc_id)
+            dc = self.network.dcs[dc_id]
+            score = 0
+            
+            # Higher score for DCs in the path (decreasing by position)
+            if path and dc_id in path:
+                position = path.index(dc_id)
+                score += (len(path) - position) * 100  # Path priority
+            
+            # Higher score for DCs with more available resources
+            score += (dc.cpu / dc.max_cpu) * 50  # CPU availability
+            score += (dc.storage / dc.max_storage) * 30  # Storage availability
+            
+            # Higher score if DC is source of urgent SFC
+            if dc_id == most_urgent_sfc.src:
+                score += 200  # Source DC gets highest priority
+            
+            # Bonus for DCs that already have required VNF installed
+            current_vnf = most_urgent_sfc.get_current_vnf()
+            if current_vnf and dc.installed_vnfs.get(current_vnf, 0) > 0:
+                score += 50
+            
+            dc_scores[dc_id] = score
+        
+        # Sort by score (highest first)
+        priority_list = sorted(dc_scores.keys(), key=lambda x: dc_scores[x], reverse=True)
         
         return priority_list
     
-    def get_valid_actions(self, dc_id):
-        """Get valid actions for a DC - same as main.py."""
-        valid = []
-        dc = self.network.dcs[dc_id]
+    def calculate_vnf_priority(self, vnf_type, dc_id):
+        """
+        Calculate VNF priority using P1 + P2 + P3 formula from Algorithm 1 (Steps 22-29).
         
-        for i, vnf in enumerate(VNF_TYPES):
-            if dc.can_install(vnf):
-                valid.append(i)
-            if dc.installed_vnfs[vnf] > 0:
-                valid.append(len(VNF_TYPES) + i)
+        Returns: List of (sfc, priority) tuples sorted by priority (highest first)
+        """
+        vnf_priority_list = []
         
-        valid.append(2 * len(VNF_TYPES))
-        return valid
+        for sfc in self.traffic_gen.active_sfcs:
+            if not sfc.active:
+                continue
+            
+            # Check if this SFC needs this VNF type next
+            current_vnf = sfc.get_current_vnf()
+            if current_vnf != vnf_type:
+                continue
+            
+            # Calculate P1: Remaining time priority (higher when less time remaining)
+            # P1 = TE_s - D_s (time elapsed - E2E delay tolerance)
+            # Higher value = more urgent
+            remaining_delay = sfc.get_remaining_delay()
+            max_delay = sfc.max_delay
+            p1 = (max_delay - remaining_delay) / max(max_delay, 1)  # Normalized
+            
+            # Calculate P2: SFC-based priority
+            # Higher if previous VNFs in chain are allocated to this DC
+            # Lower if previous VNFs are allocated to other DCs
+            p2 = 0
+            for vnf_idx in range(sfc.current_vnf_idx):
+                if vnf_idx < len(sfc.placement):
+                    if sfc.placement[vnf_idx] == dc_id:
+                        p2 += 1  # Same DC bonus
+                    else:
+                        p2 -= 0.5  # Different DC penalty
+            
+            # Normalize P2
+            if sfc.current_vnf_idx > 0:
+                p2 = p2 / sfc.current_vnf_idx
+            
+            # Calculate P3: Urgency priority
+            # If remaining time < threshold, increase priority significantly
+            # P3 = C / (D_s - TE_s + epsilon)
+            epsilon = 0.001
+            urgency_threshold = P3_URGENCY_THRESHOLD * max_delay
+            if remaining_delay < urgency_threshold:
+                p3 = P3_CONSTANT / (remaining_delay + epsilon)
+            else:
+                p3 = 0
+            
+            # Normalize P3
+            p3 = min(p3 / P3_CONSTANT, 1.0)
+            
+            # Total priority
+            priority = p1 + p2 + p3
+            
+            # Bonus if this DC is on the SFC's shortest path
+            if sfc.shortest_path and dc_id in sfc.shortest_path:
+                priority += 0.5
+            
+            vnf_priority_list.append((sfc, priority))
+        
+        # Sort by priority (highest first)
+        vnf_priority_list.sort(key=lambda x: x[1], reverse=True)
+        
+        return vnf_priority_list
     
     def step(self, dc_id, action):
         """
-        Execute action - same dynamics as main.py VNFPlacementEnv.step()
+        Execute action following Algorithm 1 (Steps 7-32).
+        
+        Action types:
+        - 0 to |V|-1: Allocation of VNF type (Install if needed + Allocate to highest priority SFC)
+        - |V| to 2*|V|-1: Uninstall VNF type
+        - 2*|V|: Wait
         """
         reward = 0
-        done = False
-        
-        if self.current_sfc is None:
-            return (None, None, None), -1, True
-        
         dc = self.network.dcs[dc_id]
         
-        # Install action
-        if action < len(VNF_TYPES):
+        # Parse action type (Algorithm 1, Step 7)
+        if action < self.num_vnf_types:
+            # ALLOCATION action (Algorithm 1, Steps 17-32)
             vnf_type = VNF_TYPES[action]
-            if dc.install_vnf(vnf_type):
-                reward = -0.1
+            
+            # Get VNFs of this type waiting for allocation with priorities
+            vnf_priority_list = self.calculate_vnf_priority(vnf_type, dc_id)
+            
+            if not vnf_priority_list:
+                # No VNFs waiting to be allocated with this type - invalid action
+                reward = REWARD_INVALID_ACTION
             else:
-                reward = -1
-        
-        # Uninstall action
-        elif action < 2 * len(VNF_TYPES):
-            vnf_type = VNF_TYPES[action - len(VNF_TYPES)]
-            if dc.uninstall_vnf(vnf_type):
-                reward = -0.5
+                # Check if we can install/allocate this VNF type
+                # First, check if there's an available VNF instance
+                installed = dc.installed_vnfs.get(vnf_type, 0)
+                allocated_count = sum(1 for v in dc.allocated_vnfs.values() if v == vnf_type)
+                available = installed - allocated_count
+                
+                if available <= 0:
+                    # Need to install new VNF instance
+                    if dc.can_install(vnf_type):
+                        dc.install_vnf(vnf_type)
+                        available = 1
+                    else:
+                        # Cannot install - no resources - invalid action
+                        reward = REWARD_INVALID_ACTION
+                        return self._get_state(dc_id), reward, False
+                
+                # Select highest priority VNF to allocate (Algorithm 1, Step 30)
+                selected_sfc, priority = vnf_priority_list[0]
+                
+                # Perform allocation (Algorithm 1, Step 31)
+                if dc.can_allocate(vnf_type, selected_sfc.id):
+                    dc.allocate_vnf(vnf_type, selected_sfc.id)
+                    
+                    # Advance the SFC
+                    process_time = VNF_SPECS[vnf_type]['process_time']
+                    selected_sfc.advance_vnf(dc_id, process_time)
+                    
+                    # Check if SFC is complete
+                    if selected_sfc.is_complete():
+                        if not selected_sfc.check_delay_violation():
+                            reward = REWARD_SFC_SATISFIED
+                            self.sfcs_satisfied += 1
+                        else:
+                            reward = REWARD_SFC_DROPPED
+                            self.sfcs_dropped += 1
+                        selected_sfc.active = False
+                        # Deallocate VNFs for this SFC
+                        self._deallocate_sfc(selected_sfc)
+                    else:
+                        # Partial reward for successful allocation
+                        reward = 0.1
+                else:
+                    reward = REWARD_INVALID_ACTION
+                    
+        elif action < 2 * self.num_vnf_types:
+            # UNINSTALL action (Algorithm 1, Steps 11-16)
+            vnf_type = VNF_TYPES[action - self.num_vnf_types]
+            
+            # Check if there's an idle VNF of this type (Algorithm 1, Step 13)
+            installed = dc.installed_vnfs.get(vnf_type, 0)
+            allocated_count = sum(1 for v in dc.allocated_vnfs.values() if v == vnf_type)
+            idle = installed - allocated_count
+            
+            if idle <= 0:
+                # No idle VNF to uninstall - invalid action
+                reward = REWARD_INVALID_ACTION
             else:
-                reward = -1
-        
-        # Wait action
+                # Check if any VNF of this type is waiting to be allocated (Algorithm 1, Step 14)
+                vnfs_waiting = any(
+                    sfc.get_current_vnf() == vnf_type 
+                    for sfc in self.traffic_gen.active_sfcs if sfc.active
+                )
+                
+                if vnfs_waiting:
+                    # Uninstalling a VNF that is still needed - penalty
+                    reward = REWARD_UNINSTALL_REQUIRED_VNF
+                else:
+                    reward = 0  # Valid uninstall, no penalty
+                
+                # Perform uninstall (Algorithm 1, Step 15)
+                dc.uninstall_vnf(vnf_type)
+                
         else:
+            # WAIT action (Algorithm 1, Steps 8-10)
             reward = 0
         
-        # Try to allocate current VNF if possible
-        current_vnf = self.current_sfc.get_current_vnf()
-        if current_vnf and dc.can_allocate(current_vnf, self.current_sfc.id):
-            if dc_id not in self.current_sfc.placement:
-                dc.allocate_vnf(current_vnf, self.current_sfc.id)
-                process_time = VNF_SPECS[current_vnf]['process_time']
-                self.current_sfc.advance_vnf(dc_id, process_time)
-                reward += 0.5
-                
-                if self.current_sfc.is_complete():
-                    if not self.current_sfc.check_delay_violation():
-                        reward = REWARD_SFC_SATISFIED
-                        self.current_sfc.active = False
-                    else:
-                        reward = REWARD_SFC_DROPPED
-                        self.current_sfc.active = False
-                    done = True
+        # Update time for all active SFCs
+        self._update_sfc_times(ACTION_INFERENCE_TIME)
         
-        # Check delay violation
-        if not done and self.current_sfc.check_delay_violation():
-            reward = REWARD_SFC_DROPPED
-            self.current_sfc.active = False
-            done = True
-        
-        # Move to next SFC if current one is done
-        if done:
-            self.traffic_gen.remove_completed()
-            if len(self.traffic_gen.active_sfcs) > 0:
-                self.current_sfc = self.traffic_gen.active_sfcs[0]
-                done = False
-            else:
-                self.current_sfc = None
+        # Check for dropped SFCs due to delay violation
+        self._check_dropped_sfcs()
         
         next_state = self._get_state(dc_id)
+        
+        # Episode done when no active SFCs
+        done = not any(sfc.active for sfc in self.traffic_gen.active_sfcs)
+        
         return next_state, reward, done
     
-    def _get_action_type(self, action):
-        """Determine action type from action index."""
-        if action < self.num_vnf_types:
-            return 'install'
-        elif action < 2 * self.num_vnf_types:
-            return 'uninstall'
-        else:
-            return 'wait'
+    def _deallocate_sfc(self, sfc):
+        """Deallocate all VNF resources for a completed/dropped SFC."""
+        for dc in self.network.dcs:
+            keys_to_remove = [k for k, v in dc.allocated_vnfs.items() if k == sfc.id]
+            for key in keys_to_remove:
+                del dc.allocated_vnfs[key]
+    
+    def _update_sfc_times(self, time_delta):
+        """Update elapsed time for all active SFCs."""
+        for sfc in self.traffic_gen.active_sfcs:
+            if sfc.active:
+                sfc.elapsed_time += time_delta
+    
+    def _check_dropped_sfcs(self):
+        """Check and mark SFCs that have exceeded their E2E delay."""
+        for sfc in self.traffic_gen.active_sfcs:
+            if sfc.active and sfc.check_delay_violation():
+                sfc.active = False
+                self.sfcs_dropped += 1
+                self._deallocate_sfc(sfc)
+    
+    def advance_step(self):
+        """
+        Advance simulation by one step (T = 1ms).
+        Generate new SFCs every N = 4 steps.
+        """
+        self.step_count += 1
+        self.current_time += STEP_DURATION
+        
+        # Update time for all SFCs
+        self._update_sfc_times(STEP_DURATION)
+        
+        # Generate new SFCs every N steps (Algorithm 1 training description)
+        if self.step_count % SFC_GENERATION_INTERVAL == 0:
+            new_sfcs = self.traffic_gen.generate_bundle(request_count=1)
+            self.sfcs_total += len(new_sfcs)
+            
+            # Assign shortest paths to new SFCs
+            for sfc in new_sfcs:
+                sfc.shortest_path = self.network.get_shortest_path(sfc.src, sfc.dst, sfc.bw)
+        
+        # Check for dropped SFCs
+        self._check_dropped_sfcs()
+    
+    def has_pending_sfcs(self):
+        """Check if there are any pending SFC requests."""
+        return any(sfc.active for sfc in self.traffic_gen.active_sfcs)
     
     def get_stats(self):
         """Get current statistics."""
         return {
-            'active_sfcs': len(self.traffic_gen.active_sfcs),
-            'current_sfc': self.current_sfc.type if self.current_sfc else None,
+            'satisfied': self.sfcs_satisfied,
+            'dropped': self.sfcs_dropped,
+            'total': self.sfcs_total,
+            'active': sum(1 for sfc in self.traffic_gen.active_sfcs if sfc.active),
             'step': self.step_count,
             'time': self.current_time
         }
@@ -334,7 +541,7 @@ class PretrainDQN:
     
     Training procedure:
     - U = 350 updates
-    - E = 20 episodes per update
+    - E = 20 episodes per update  
     - A = 100 actions per step
     - Step duration T = 1ms
     - SFC generation every N = 4 steps
@@ -391,19 +598,19 @@ class PretrainDQN:
             update_dropped = []
             
             for ep in range(episodes_per_update):
-                episode_reward, accepted, dropped, total = self._run_episode()
+                episode_reward, acceptance_rate, drop_rate = self._run_episode()
                 
                 update_rewards.append(episode_reward)
-                update_acceptance.append(accepted / max(total, 1))
-                update_dropped.append(dropped / max(total, 1))
+                update_acceptance.append(acceptance_rate)
+                update_dropped.append(drop_rate)
                 
                 total_episodes += 1
                 
                 # Store stats
                 self.stats['episodes'].append(total_episodes)
                 self.stats['rewards'].append(episode_reward)
-                self.stats['acceptance'].append(accepted / max(total, 1))
-                self.stats['dropped'].append(dropped / max(total, 1))
+                self.stats['acceptance'].append(acceptance_rate)
+                self.stats['dropped'].append(drop_rate)
                 
                 # Decay epsilon
                 self.dqn.decay_epsilon()
@@ -422,6 +629,13 @@ class PretrainDQN:
             
             # Update target network after each update cycle
             self.dqn.update_target_model()
+            
+            # Train on replay buffer
+            if len(self.replay_buffer) >= TRAINING_CONFIG['batch_size']:
+                for _ in range(10):  # Multiple training iterations per update
+                    batch = self.replay_buffer.sample(TRAINING_CONFIG['batch_size'])
+                    states, actions, rewards, next_states_batch, dones = batch
+                    self.dqn.train_step(states, actions, rewards, next_states_batch, dones)
             
             # Print progress per update
             avg_reward = np.mean(update_rewards)
@@ -443,60 +657,89 @@ class PretrainDQN:
     
     def _run_episode(self):
         """
-        Run a single episode - same dynamics as main.py train_dqn.
-        Episode processes SFC requests one by one until none pending.
+        Run a single episode following Algorithm 1.
+        
+        Episode starts with incoming SFC requests and ends once there are no pending requests.
+        At each step, performs A actions across prioritized DCs.
+        
+        Paper: "Each episode starts with incoming SFC requests and ends once there are 
+        no pending SFC requests."
+        
+        We generate SFCs only at specific intervals (first 3 request counts as in paper evaluation).
         """
         self.env.reset()
         episode_reward = 0
-        accepted = 0
-        dropped = 0
-        total_requests = len(self.env.traffic_gen.active_sfcs)
-        step_count = 0
-        max_steps = 500  # Safety limit
+        max_steps = 50  # Reduced for faster episodes
+        request_counts_generated = 1  # Already generated 1 at reset
+        max_request_counts = 1  # Only initial bundle for faster training
         
-        while self.env.current_sfc is not None and step_count < max_steps:
-            # Get DC priority and select highest priority DC
-            dc_priority_list = self.env.set_dc_priority()
-            dc_id = dc_priority_list[0]
+        while self.env.has_pending_sfcs() and self.env.step_count < max_steps:
+            # Perform A actions in this step
+            step_reward = 0
             
-            # Get states
-            dc_state, sfc_state, network_state = self.env._get_state(dc_id)
-            if dc_state is None:
-                break
-            
-            # Get valid actions and select action
-            valid_actions = self.env.get_valid_actions(dc_id)
-            action = self.dqn.get_action(dc_state, sfc_state, network_state, valid_actions)
-            
-            # Execute action
-            next_states, reward, done = self.env.step(dc_id, action)
-            
-            # Store in replay buffer
-            if next_states[0] is not None:
+            for action_idx in range(ACTIONS_PER_STEP):
+                if not self.env.has_pending_sfcs():
+                    break
+                
+                # Get DC priority list (Algorithm 1, Step 1)
+                dc_priority_list = self.env.set_dc_priority()
+                
+                # Select highest priority DC (Algorithm 1, Step 2)
+                dc_id = dc_priority_list[0]
+                
+                # Get states (Algorithm 1, Steps 3-5)
+                dc_state, sfc_state, network_state = self.env._get_state(dc_id)
+                
+                # Get action from DRL model (Algorithm 1, Step 6)
+                action = self.dqn.get_action(dc_state, sfc_state, network_state)
+                
+                # Execute action and get reward (Algorithm 1, Steps 7-32)
+                next_states, reward, done = self.env.step(dc_id, action)
+                
+                # Store experience in replay buffer (Algorithm 1, Step 34)
                 self.replay_buffer.push(
                     dc_state, sfc_state, network_state,
                     action, reward,
                     next_states[0], next_states[1], next_states[2],
                     done
                 )
+                
+                step_reward += reward
+                
+                if done:
+                    break
             
-            episode_reward += reward
+            episode_reward += step_reward
             
-            # Track accepted/dropped SFCs
-            if reward == REWARD_SFC_SATISFIED:
-                accepted += 1
-            elif reward == REWARD_SFC_DROPPED:
-                dropped += 1
+            # Advance step - but limit SFC generation to first few intervals
+            self.env.step_count += 1
+            self.env.current_time += STEP_DURATION
+            self.env._update_sfc_times(STEP_DURATION)
             
-            # Train DQN periodically
+            # Generate new SFCs at intervals, but only up to max_request_counts
+            if (self.env.step_count % SFC_GENERATION_INTERVAL == 0 and 
+                request_counts_generated < max_request_counts):
+                new_sfcs = self.env.traffic_gen.generate_bundle(request_count=1)
+                self.env.sfcs_total += len(new_sfcs)
+                for sfc in new_sfcs:
+                    sfc.shortest_path = self.env.network.get_shortest_path(sfc.src, sfc.dst, sfc.bw)
+                request_counts_generated += 1
+            
+            self.env._check_dropped_sfcs()
+            
+            # Train periodically within episode
             if len(self.replay_buffer) >= TRAINING_CONFIG['batch_size']:
                 batch = self.replay_buffer.sample(TRAINING_CONFIG['batch_size'])
                 states, actions, rewards, next_states_batch, dones = batch
                 self.dqn.train_step(states, actions, rewards, next_states_batch, dones)
-            
-            step_count += 1
         
-        return episode_reward, accepted, dropped, total_requests
+        # Calculate acceptance and drop rates
+        stats = self.env.get_stats()
+        total = max(stats['total'], 1)
+        acceptance_rate = stats['satisfied'] / total
+        drop_rate = stats['dropped'] / total
+        
+        return episode_reward, acceptance_rate, drop_rate
     
     def save_model(self, path="checkpoints/pretrained_dqn"):
         """Save trained model weights."""
@@ -512,13 +755,14 @@ class PretrainDQN:
 
 def evaluate_model(dqn, num_dcs=4, num_episodes=50):
     """
-    Evaluate trained model - same dynamics as main.py.
+    Evaluate trained model performance.
     """
     env = SFCProvisioningEnv(num_dcs)
     
     results = {
         'acceptance_ratios': [],
-        'resource_usage': []
+        'drop_ratios': [],
+        'rewards': []
     }
     
     # Disable exploration during evaluation
@@ -527,40 +771,34 @@ def evaluate_model(dqn, num_dcs=4, num_episodes=50):
     
     for ep in range(num_episodes):
         env.reset()
-        accepted = 0
-        dropped = 0
-        total_requests = len(env.traffic_gen.active_sfcs)
-        step_count = 0
-        max_steps = 500
+        episode_reward = 0
+        max_steps = 200
         
-        while env.current_sfc is not None and step_count < max_steps:
-            dc_priority_list = env.set_dc_priority()
-            dc_id = dc_priority_list[0]
+        while env.has_pending_sfcs() and env.step_count < max_steps:
+            for _ in range(ACTIONS_PER_STEP):
+                if not env.has_pending_sfcs():
+                    break
+                
+                dc_priority_list = env.set_dc_priority()
+                dc_id = dc_priority_list[0]
+                
+                dc_state, sfc_state, network_state = env._get_state(dc_id)
+                action = dqn.get_action(dc_state, sfc_state, network_state)
+                
+                next_states, reward, done = env.step(dc_id, action)
+                episode_reward += reward
+                
+                if done:
+                    break
             
-            dc_state, sfc_state, network_state = env._get_state(dc_id)
-            if dc_state is None:
-                break
-            
-            valid_actions = env.get_valid_actions(dc_id)
-            action = dqn.get_action(dc_state, sfc_state, network_state, valid_actions)
-            
-            next_states, reward, done = env.step(dc_id, action)
-            
-            if reward == REWARD_SFC_SATISFIED:
-                accepted += 1
-            elif reward == REWARD_SFC_DROPPED:
-                dropped += 1
-            
-            step_count += 1
+            env.advance_step()
         
-        acceptance_ratio = accepted / max(total_requests, 1)
-        results['acceptance_ratios'].append(acceptance_ratio)
+        stats = env.get_stats()
+        total = max(stats['total'], 1)
         
-        # Calculate average resource usage
-        total_cpu_used = sum(dc.max_cpu - dc.cpu for dc in env.network.dcs)
-        total_storage_used = sum(dc.max_storage - dc.storage for dc in env.network.dcs)
-        avg_resource = (total_cpu_used + total_storage_used) / (2 * num_dcs)
-        results['resource_usage'].append(avg_resource)
+        results['acceptance_ratios'].append(stats['satisfied'] / total)
+        results['drop_ratios'].append(stats['dropped'] / total)
+        results['rewards'].append(episode_reward)
     
     # Restore epsilon
     dqn.epsilon = original_epsilon
@@ -569,7 +807,8 @@ def evaluate_model(dqn, num_dcs=4, num_episodes=50):
     print("Evaluation Results")
     print(f"{'='*60}")
     print(f"Average Acceptance Ratio: {np.mean(results['acceptance_ratios']):.2%}")
-    print(f"Average Resource Usage: {np.mean(results['resource_usage']):.2f}")
+    print(f"Average Drop Ratio: {np.mean(results['drop_ratios']):.2%}")
+    print(f"Average Reward: {np.mean(results['rewards']):.2f}")
     print(f"{'='*60}")
     
     return results
